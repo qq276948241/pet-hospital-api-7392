@@ -94,7 +94,12 @@ func CreateAppointment(c *gin.Context) {
 		return
 	}
 
-	utils.Success(c, appointment)
+	notification, _ := utils.CreateAppointmentReminder(&appointment)
+
+	utils.Success(c, gin.H{
+		"appointment":  appointment,
+		"notification": notification,
+	})
 }
 
 func GetAppointments(c *gin.Context) {
@@ -171,6 +176,8 @@ func CancelAppointment(c *gin.Context) {
 		return
 	}
 
+	utils.UpdateAppointmentReminder(&appointment)
+
 	utils.SuccessWithMessage(c, "取消成功", appointment)
 }
 
@@ -243,6 +250,8 @@ func RescheduleAppointment(c *gin.Context) {
 		return
 	}
 
+	utils.UpdateAppointmentReminder(&appointment)
+
 	utils.SuccessWithMessage(c, "改签成功", appointment)
 }
 
@@ -281,6 +290,10 @@ func UpdateAppointmentStatus(c *gin.Context) {
 	if err := models.DB.Save(&appointment).Error; err != nil {
 		utils.InternalError(c, "更新状态失败: "+err.Error())
 		return
+	}
+
+	if req.Status == "cancelled" || req.Status == "completed" || req.Status == "no_show" {
+		utils.UpdateAppointmentReminder(&appointment)
 	}
 
 	utils.Success(c, appointment)

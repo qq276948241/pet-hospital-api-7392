@@ -132,5 +132,18 @@ func SetupRoutes(r *gin.Engine) {
 			dashboard.GET("/recent-activities", handlers.GetRecentActivities)
 			dashboard.GET("/user-stats", handlers.GetUserDashboardStats)
 		}
+
+		notifications := api.Group("/notifications")
+		notifications.Use(middleware.AuthMiddleware())
+		{
+			notifications.GET("", handlers.GetNotifications)
+			notifications.GET("/unread-count", handlers.GetUnreadCount)
+			notifications.GET("/:id", handlers.GetNotificationByID)
+			notifications.POST("/:id/read", handlers.MarkNotificationRead)
+			notifications.POST("/read-all", handlers.MarkAllNotificationsRead)
+			notifications.DELETE("/:id", handlers.DeleteNotification)
+			notifications.DELETE("/clear-all", handlers.ClearAllNotifications)
+			notifications.POST("/test-reminder", handlers.CreateTestReminder)
+		}
 	}
 }

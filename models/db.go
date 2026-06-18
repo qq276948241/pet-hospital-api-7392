@@ -39,6 +39,7 @@ func InitDB() {
 		&Vaccine{},
 		&VaccineRecord{},
 		&Medicine{},
+		&Notification{},
 	)
 	if err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)

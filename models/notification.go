@@ -14,6 +14,7 @@ type Notification struct {
 	ScheduledTime   time.Time `gorm:"index" json:"scheduled_time"`
 	SentTime        *time.Time `json:"sent_time"`
 	IsSent          bool      `gorm:"default:false;index" json:"is_sent"`
+	IsCancelled     bool      `gorm:"default:false;index" json:"is_cancelled"`
 	IsRead          bool      `gorm:"default:false;index" json:"is_read"`
 	ReadTime        *time.Time `json:"read_time"`
 	Channel         string    `gorm:"size:20;default:'in_app'" json:"channel"`

@@ -72,7 +72,7 @@ func (s *Scheduler) checkAndSendNotifications() {
 
 	var notifications []models.Notification
 	err := models.DB.Preload("Appointment").Preload("Appointment.Pet").Preload("Appointment.Doctor").
-		Where("is_sent = ? AND scheduled_time <= ?", false, now).
+		Where("is_sent = ? AND is_cancelled = ? AND scheduled_time <= ?", false, false, now).
 		Find(&notifications).Error
 	if err != nil {
 		log.Printf("[Scheduler] 查询待发送提醒失败: %v", err)
@@ -85,18 +85,97 @@ func (s *Scheduler) checkAndSendNotifications() {
 
 	log.Printf("[Scheduler] 检查到 %d 条待发送提醒", len(notifications))
 
-	for _, notif := range notifications {
-		if err := sendNotification(&notif); err != nil {
+	sentCount := 0
+	skippedCount := 0
+
+	for i := range notifications {
+		notif := &notifications[i]
+
+		if !validateNotificationBeforeSend(notif) {
+			skippedCount++
+			continue
+		}
+
+		if err := sendNotification(notif); err != nil {
 			log.Printf("[Scheduler] 发送提醒失败 (ID:%d): %v", notif.ID, err)
 			continue
 		}
 
 		sentTime := time.Now()
-		models.DB.Model(&notif).Updates(map[string]interface{}{
+		models.DB.Model(notif).Updates(map[string]interface{}{
 			"is_sent":  true,
 			"sent_time": sentTime,
 		})
+		sentCount++
 	}
+
+	log.Printf("[Scheduler] 本次发送完成：成功 %d 条，跳过 %d 条", sentCount, skippedCount)
+}
+
+func validateNotificationBeforeSend(notif *models.Notification) bool {
+	if notif.IsCancelled {
+		log.Printf("[Scheduler] 跳过提醒 ID:%d：已被取消", notif.ID)
+		return false
+	}
+
+	if notif.AppointmentID == 0 {
+		log.Printf("[Scheduler] 跳过提醒 ID:%d：无关联预约", notif.ID)
+		cancelNotification(notif, "无关联预约")
+		return false
+	}
+
+	if notif.Appointment == nil {
+		var appt models.Appointment
+		if err := models.DB.First(&appt, notif.AppointmentID).Error; err != nil {
+			log.Printf("[Scheduler] 跳过提醒 ID:%d：关联预约不存在", notif.ID)
+			cancelNotification(notif, "关联预约已删除")
+			return false
+		}
+		notif.Appointment = &appt
+	}
+
+	if notif.Appointment.UserID != notif.UserID {
+		log.Printf("[Scheduler] ⚠️  发错人风险！提醒 ID:%d 所属用户:%d，但预约用户:%d，已自动取消",
+			notif.ID, notif.UserID, notif.Appointment.UserID)
+		cancelNotification(notif, fmt.Sprintf("用户不匹配: 通知用户%d != 预约用户%d", notif.UserID, notif.Appointment.UserID))
+		return false
+	}
+
+	invalidStatuses := []string{"cancelled", "completed", "no_show"}
+	for _, status := range invalidStatuses {
+		if notif.Appointment.Status == status {
+			log.Printf("[Scheduler] 跳过提醒 ID:%d：预约已%s", notif.ID, status)
+			cancelNotification(notif, fmt.Sprintf("预约已%s", status))
+			return false
+		}
+	}
+
+	if notif.Appointment.PetID != 0 {
+		var pet models.Pet
+		if err := models.DB.First(&pet, notif.Appointment.PetID).Error; err == nil {
+			if pet.OwnerID != notif.UserID {
+				log.Printf("[Scheduler] ⚠️  宠物主人不匹配！提醒 ID:%d 用户:%d，但宠物主人:%d",
+					notif.ID, notif.UserID, pet.OwnerID)
+				cancelNotification(notif, fmt.Sprintf("宠物主人不匹配: 用户%d != 主人%d", notif.UserID, pet.OwnerID))
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func cancelNotification(notif *models.Notification, reason string) {
+	remark := notif.Remark
+	if remark != "" {
+		remark += " | "
+	}
+	remark += "自动取消: " + reason
+
+	models.DB.Model(notif).Updates(map[string]interface{}{
+		"is_cancelled": true,
+		"remark":       remark,
+	})
 }
 
 func sendNotification(notif *models.Notification) error {
@@ -141,6 +220,10 @@ func CreateAppointmentReminder(appointment *models.Appointment) (*models.Notific
 		return nil, fmt.Errorf("获取医生信息失败: %v", err)
 	}
 
+	if pet.OwnerID != appointment.UserID {
+		return nil, fmt.Errorf("宠物主人不匹配: 宠物主人ID=%d, 预约用户ID=%d", pet.OwnerID, appointment.UserID)
+	}
+
 	appointmentTime, err := parseAppointmentTime(appointment.AppointmentDate, appointment.Shift)
 	if err != nil {
 		return nil, fmt.Errorf("解析预约时间失败: %v", err)
@@ -165,6 +248,7 @@ func CreateAppointmentReminder(appointment *models.Appointment) (*models.Notific
 		Content:       content,
 		ScheduledTime: scheduledTime,
 		IsSent:        false,
+		IsCancelled:   false,
 		IsRead:        false,
 		Channel:       "in_app",
 		Remark:        fmt.Sprintf("预约时间前1小时提醒 | 原预约时间: %s", appointmentTime.Format("2006-01-02 15:04")),
@@ -174,35 +258,52 @@ func CreateAppointmentReminder(appointment *models.Appointment) (*models.Notific
 		return nil, fmt.Errorf("创建提醒失败: %v", err)
 	}
 
-	log.Printf("[提醒调度] 已为预约ID:%d 创建提醒，将在 %s 发送",
-		appointment.ID, scheduledTime.Format("2006-01-02 15:04:05"))
+	log.Printf("[提醒调度] 已为预约ID:%d 创建提醒 (通知ID:%d)，将在 %s 发送给用户ID:%d",
+		appointment.ID, notification.ID, scheduledTime.Format("2006-01-02 15:04:05"), appointment.UserID)
 
 	return &notification, nil
 }
 
 func UpdateAppointmentReminder(appointment *models.Appointment) error {
 	var existingNotifs []models.Notification
-	models.DB.Where("appointment_id = ? AND is_sent = ? AND type = ?",
-		appointment.ID, false, "appointment_reminder").Find(&existingNotifs)
+	err := models.DB.Where("appointment_id = ? AND is_sent = ? AND is_cancelled = ? AND type = ?",
+		appointment.ID, false, false, "appointment_reminder").Find(&existingNotifs).Error
+	if err != nil {
+		return fmt.Errorf("查询现有提醒失败: %v", err)
+	}
 
-	for _, notif := range existingNotifs {
-		models.DB.Model(&notif).Updates(map[string]interface{}{
-			"is_sent": true,
-			"remark":  notif.Remark + " | 已取消（预约已改签/取消）",
+	for i := range existingNotifs {
+		notif := &existingNotifs[i]
+		remark := notif.Remark
+		if remark != "" {
+			remark += " | "
+		}
+
+		if appointment.Status == "cancelled" {
+			remark += "预约已取消"
+		} else {
+			remark += "预约已改签"
+		}
+
+		models.DB.Model(notif).Updates(map[string]interface{}{
+			"is_cancelled": true,
+			"remark":       remark,
 		})
+		log.Printf("[提醒调度] 已取消提醒 ID:%d，原因: %s", notif.ID, remark)
 	}
 
 	if appointment.Status == "cancelled" {
-		log.Printf("[提醒调度] 预约ID:%d 已取消，原有提醒已标记为取消", appointment.ID)
+		log.Printf("[提醒调度] 预约ID:%d 已取消，已取消 %d 条关联提醒", appointment.ID, len(existingNotifs))
 		return nil
 	}
 
-	_, err := CreateAppointmentReminder(appointment)
+	newNotif, err := CreateAppointmentReminder(appointment)
 	if err != nil {
-		return err
+		return fmt.Errorf("创建新提醒失败: %v", err)
 	}
 
-	log.Printf("[提醒调度] 预约ID:%d 已改签，已重新创建提醒", appointment.ID)
+	log.Printf("[提醒调度] 预约ID:%d 已改签，已取消 %d 条旧提醒，创建新提醒 ID:%d",
+		appointment.ID, len(existingNotifs), newNotif.ID)
 	return nil
 }
 

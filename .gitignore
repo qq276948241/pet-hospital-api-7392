@@ -1,0 +1,17 @@
+# Go
+bin/
+obj/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+go.sum
+*.log
+.env
+.DS_Store
+.idea/
+.vscode/
